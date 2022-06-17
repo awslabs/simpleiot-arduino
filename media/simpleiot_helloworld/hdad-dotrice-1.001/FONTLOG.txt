@@ -1,0 +1,24 @@
+FONTLOG for Dotrice
+
+This file provides detailed information on the Dotrice Font Software. 
+This information should be distributed along with the Dotrice fonts 
+and any derivative works.
+
+Basic Font Information
+
+Designed to look like an old EPSON FX-80 printer.
+
+ChangeLog
+
+2011-06-01 (Paul Flo Williams) Dotrice Version 1.001
+- Initial release for Open Font Library. This release doesn't include
+  the oblique style (because I haven't finished it), Dotrice Worn or
+  Dotrice Touch, or the build scripts, because they are currently too
+  messy.
+
+Acknowledgements
+
+N: Paul Flo Williams
+E: paul@frixxon.co.uk
+W: http://hisdeedsaredust.com/
+D: Designer - original glyphs
