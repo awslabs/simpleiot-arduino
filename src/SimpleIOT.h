@@ -21,7 +21,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ssl_client.h>
-#include <MQTTClient.h>
+#include <ArduinoMqttClient.h>
 #include <Update.h>
 #include <ArduinoJson.h>
 #include <AWSGreenGrassIoT.h>
@@ -144,7 +144,15 @@ typedef struct {
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 class SimpleIOT {
-  public:
+
+private:
+    SimpleIOT() {} // empty plain ctor for Singleton
+
+public:
+    static SimpleIOT* getImpl() { return _iot_singleton; }
+    static MqttClient* getClient() { return _iot_singleton->_mqttClient; }
+
+    // Use this to create an instance.
     static SimpleIOT* create(const char* wifiSSID,
                              const char* wifiPassword,
                              const char* iotEndpoint,
@@ -153,6 +161,8 @@ class SimpleIOT {
                              const char* keyPem,
                              bool withGateway=false); // set to true if device goes through a gateway
 
+    // And this one to initialize and connect.
+    //
     void config(const char* project,
                             const char* model,
                             const char* serialNumber,
@@ -206,7 +216,7 @@ class SimpleIOT {
 
     // For internal use, but it can't be declared private
     //
-    void _invokeCallback(char* topic, char* bytes, int length);
+    void _invokeCallback(const char* topic, const char* buffer, const unsigned int length);
     //int diag(const char* diagID, const char* result);
 
   protected:
@@ -252,27 +262,27 @@ class SimpleIOT {
     int _fwUpdatePercent;           //Percent downloaded
 
     WiFiClientSecure* _wifiClient;
-    MQTTClient* _mqttClient;
+    MqttClient* _mqttClient;
     AWSGreenGrassIoT* _greengrass;
     static SimpleIOT* _iot_singleton;  // have to do this to avoid forking and modifying AWSGreenGrassIoT
 
 
     // Private methods
     //
-    void _sendMessage(const char* op,
+    int _sendMessage(const char* op,
                         const char* name,
                         const char* value,
                         SimpleIOTMessageType msgtype=MESSAGE_APP);
-    void _sendMessage(const char* op,
+    int _sendMessage(const char* op,
                         const char* name,
                         const char* value,
                         float lat,
                         float lng,
                         SimpleIOTMessageType msgtype=MESSAGE_APP);
-    void _sendRawMessage(const char* op,
+    int _sendRawMessage(const char* op,
                         DynamicJsonDocument payload,
                         SimpleIOTMessageType msgtype=MESSAGE_APP);
-    void _publish(char* buffer, char* payload);
+    int _publish(char* buffer, char* payload);
     void _updateFirmware(uint8_t *data, size_t len);
     void _doUpdate(char* op, bool force = false);
     void _updateReceived();      // this marks the update as having been received.

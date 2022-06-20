@@ -22,15 +22,18 @@ SimpleIOT* SimpleIOT::_iot_singleton = NULL;  // Singleton needed for greengrass
 
 ///////////////////////////////////////////////////////////////
 
-void SimpleIOT::_publish(char* topic, char* payload)
+int SimpleIOT::_publish(char* topic, char* payload)
 {
   if (this->_withGateway) {
       Serial.println("Publishing via GG");
       this->_greengrass->publish(topic, payload);
   } else {
       Serial.println("Publishing via direct MQTT");
-      this->_mqttClient->publish(topic, payload);
-  }  
+      this->_mqttClient->beginMessage(topic);
+      this->_mqttClient->print(payload);
+      this->_mqttClient->endMessage();
+  }
+  return 0;
 }
 
 /*
@@ -42,7 +45,7 @@ void SimpleIOT::_publish(char* topic, char* payload)
  *          "value": "20"
  *          }
  */
-void SimpleIOT::_sendRawMessage(const char* op, DynamicJsonDocument payload, SimpleIOTMessageType msgtype)
+int SimpleIOT::_sendRawMessage(const char* op, DynamicJsonDocument payload, SimpleIOTMessageType msgtype)
 {
 char jsonBuffer[SimpleIOTInternalBufferSize];
 char topicBuffer[INTERNAL_TOPIC_BUFFER_SIZE + 1];
@@ -80,7 +83,7 @@ char topicBuffer[INTERNAL_TOPIC_BUFFER_SIZE + 1];
     Serial.println(jsonBuffer);
   #endif
 
-  this->_publish(topicBuffer, jsonBuffer);
+    return this->_publish(topicBuffer, jsonBuffer);
 }
 
 /*
@@ -94,7 +97,7 @@ char topicBuffer[INTERNAL_TOPIC_BUFFER_SIZE + 1];
  *          "geo_lng": "-123.4", // if withGps specified
  *          }
  */
-void SimpleIOT::_sendMessage(const char* op, const char* name, const char* value, SimpleIOTMessageType msgtype)
+int SimpleIOT::_sendMessage(const char* op, const char* name, const char* value, SimpleIOTMessageType msgtype)
 {
 DynamicJsonDocument root(SimpleIOTInternalBufferSize);
 
@@ -104,12 +107,12 @@ DynamicJsonDocument root(SimpleIOTInternalBufferSize);
   root["name"] = name;
   root["value"] = value;
 
-  _sendRawMessage(op, root, msgtype);
+  return _sendRawMessage(op, root, msgtype);
 }
 
 // Send a message with lat/lng values
 //
-void SimpleIOT::_sendMessage(const char* op, const char* name, const char* value, float lat, float lng, SimpleIOTMessageType msgtype)
+int SimpleIOT::_sendMessage(const char* op, const char* name, const char* value, float lat, float lng, SimpleIOTMessageType msgtype)
 {
 DynamicJsonDocument root(SimpleIOTInternalBufferSize);
 
@@ -127,7 +130,7 @@ DynamicJsonDocument root(SimpleIOTInternalBufferSize);
   sprintf(lng_str, "%3.4f", lng);
   root["geo_lng"] = String(lng_str);
 
-  _sendRawMessage(op, root, msgtype);
+  return _sendRawMessage(op, root, msgtype);
 }
 
 
@@ -135,10 +138,19 @@ DynamicJsonDocument root(SimpleIOTInternalBufferSize);
  *  client instance reference. We use that to pass back the data returned back to us by the
  *  MQTT client and unmarshall the data.
  */
-void _mqttSubCallback(MQTTClient *client, char topic[], char buffer[], int buflen)
+void _mqttSubCallback(int messageSize)
 {
-  SimpleIOT* iot = (SimpleIOT*) client->ref;
-  iot->_invokeCallback(topic, buffer, buflen);
+  char buffer[SimpleIOTInternalBufferSize+1];
+
+  MqttClient* client = SimpleIOT::getClient();
+  String topic = client->messageTopic();
+
+  if (client->available()) {
+      client->read((uint8_t *) &buffer, (size_t) sizeof(buffer));
+      SimpleIOT::getImpl()->_invokeCallback((const char *) topic.c_str(),
+                                            (const char *) buffer,
+                                            (const unsigned int) strlen(buffer));
+  }
 }
 
 
@@ -152,7 +164,7 @@ SimpleIOT* SimpleIOT::create(const char* wifiSSID,
                         const char* keyPem,
                         bool withGateway)
 {
-  if (!_iot_singleton) {
+    if (!_iot_singleton) {
     _iot_singleton = new SimpleIOT(wifiSSID, wifiPassword, iotEndpoint, 
                   caPem, certPem, keyPem, withGateway);
   }
@@ -180,7 +192,9 @@ SimpleIOT::SimpleIOT(const char* wifiSSID, const char* wifiPassword, const char*
 SimpleIOT::~SimpleIOT()
 {
   if (this->_withGateway) {
-    delete this->_greengrass;
+      delete this->_greengrass;
+  } else {
+      delete this->_iot_singleton;
   }
 }
 
@@ -265,22 +279,25 @@ void SimpleIOT::config(const char* project, const char* model, const char* seria
     // Regular MQTT client
     //
     Serial.println("SimpleIOT: Creating MQTT client");
-    this->_mqttClient = new MQTTClient(SimpleIOTInternalBufferSize);
+
+    this->_mqttClient = new MqttClient(*(this->_wifiClient));
     
     // Connect to MQTT endpoint on AWS - NOTE: we should make the port configurable.
     //
-    this->_mqttClient->begin(this->_iotEndpoint, 8883, *(this->_wifiClient));
-    this->_mqttClient->ref = this;
-    this->_mqttClient->onMessageAdvanced(_mqttSubCallback);
-  
     Serial.print("SimpleIOT: Connecting to AWS IOT at endpoint: ");
     Serial.println(this->_iotEndpoint);
 
-    while (!this->_mqttClient->connect(this->_clientId)) {
-      Serial.print(".");
-      delay(200);
+    if (!(this->_mqttClient->connect(this->_iotEndpoint, 8883))) {
+        Serial.print("ERROR Connecting to MQTT endpoint. Halting: ");
+        Serial.println(this->_mqttClient->connectError());
+        while (1);
     }
-  
+
+  Serial.println("SimpleIOT: Connected to AWS IOT.");
+
+    this->_mqttClient->onMessage(_mqttSubCallback);
+
+
     if(!this->_mqttClient->connected()){
       Serial.println("SimpleIOT: TIMEOUT ERROR");
       return;
@@ -304,10 +321,6 @@ void SimpleIOT::config(const char* project, const char* model, const char* seria
     this->_mqttClient->subscribe(this->_triggerUpdateTopic);
     
   }
-  // Low level error codes in case the connection fails
-  //
-  //Serial.println("MQTT connect lastError: " + String(this->_mqttClient->lastError()));
-  //Serial.println("MQTT connect returnCode: " + String(this->_mqttClient->returnCode()));
 
   Serial.print("SimpleIOT: AWS IOT connected. IP Address: ");
   Serial.println(WiFi.localIP());
@@ -318,7 +331,7 @@ void SimpleIOT::config(const char* project, const char* model, const char* seria
   }
 }
 
-void SimpleIOT::_invokeCallback(char* topic, char* buffer, int buflen)
+void SimpleIOT::_invokeCallback(const char* topic, const char* buffer, const unsigned int buflen)
 {
   SimpleIOTType typeValue = IOT_STRING;
 
@@ -435,41 +448,41 @@ void SimpleIOT::_handleDiagRequest(const char* topic, DynamicJsonDocument jdoc)
 
 int SimpleIOT::set(const char* name, const char* value)
 {
-  this->_sendMessage(OP_SET_DATA, name, value, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, value, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, int value)
 {
   char buffer[INTERNAL_STATIC_BUFFER_SIZE + 1];
-  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.100d", value);
+  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%d", value);
 
-  this->_sendMessage(OP_SET_DATA, name, buffer, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, buffer, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, float value)
 {
   char buffer[INTERNAL_STATIC_BUFFER_SIZE + 1];
-  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.8f", value);
+  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.6f", value);
 
-  this->_sendMessage(OP_SET_DATA, name, buffer, MESSAGE_APP);
+    return this->_sendMessage(OP_SET_DATA, name, buffer, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, double value)
 {
   char buffer[INTERNAL_STATIC_BUFFER_SIZE + 1];
-  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.8g", value);
+  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.6g", value);
 
-  this->_sendMessage(OP_SET_DATA, name, buffer, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, buffer, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, boolean value)
 {
-  this->_sendMessage(OP_SET_DATA, name, value ? "true" : "false", MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, value ? "true" : "false", MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, const char* value, float latitude, float longitude)
 {
-  this->_sendMessage(OP_SET_DATA, name, value, latitude, longitude, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, value, latitude, longitude, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, int value, float latitude, float longitude)
@@ -477,35 +490,39 @@ int SimpleIOT::set(const char* name, int value, float latitude, float longitude)
   char buffer[INTERNAL_STATIC_BUFFER_SIZE + 1];
   snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%d", value);
 
-  this->_sendMessage(OP_SET_DATA, name, buffer, latitude, longitude, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, buffer, latitude, longitude, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, float value, float latitude, float longitude)
 {
   char buffer[INTERNAL_STATIC_BUFFER_SIZE + 1];
-  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.8f", value);
+  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.6f", value);
 
-  this->_sendMessage(OP_SET_DATA, name, buffer, latitude, longitude, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, buffer, latitude, longitude, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, double value, float latitude, float longitude)
 {
   char buffer[INTERNAL_STATIC_BUFFER_SIZE + 1];
-  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.8g", value);
+  snprintf(buffer, INTERNAL_STATIC_BUFFER_SIZE, "%.6g", value);
 
-  this->_sendMessage(OP_SET_DATA, name, buffer, latitude, longitude, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, buffer, latitude, longitude, MESSAGE_APP);
 }
 
 int SimpleIOT::set(const char* name, boolean value, float latitude, float longitude)
 {
-  this->_sendMessage(OP_SET_DATA, name, value ? "true" : "false", latitude, longitude, MESSAGE_APP);
+  return this->_sendMessage(OP_SET_DATA, name, value ? "true" : "false", latitude, longitude, MESSAGE_APP);
 }
 
 
 void SimpleIOT::loop(float delayMs)
 {
-  this->_mqttClient->loop();
-  delay(delayMs);
+    if (this->_mqttClient) {
+        this->_mqttClient->poll();
+    }
+    if (delayMs > 0) {
+        delay(delayMs);
+    }
 }
 
 
@@ -635,14 +652,14 @@ DynamicJsonDocument root(SimpleIOTInternalBufferSize);
 
 void SimpleIOT::checkForUpdate(bool force)
 {
-  this->_doUpdate("check", force);
+  this->_doUpdate((char *) "check", force);
 }
 
 // This will be called internally once 100% of the update has been received.
 //
 void SimpleIOT::_updateReceived()
 {
-  this->_doUpdate("received");
+  this->_doUpdate((char *) "received");
 }
 
 // This is an alternative one. It can be used by the app to indicate an update has been installed
@@ -651,5 +668,5 @@ void SimpleIOT::_updateReceived()
 
 void SimpleIOT::updateInstalled()
 {
-  this->_doUpdate("installed");
+  this->_doUpdate((char *) "installed");
 }
